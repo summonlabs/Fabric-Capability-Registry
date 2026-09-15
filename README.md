@@ -114,7 +114,9 @@ Options: FCR_BUILD_SHARED, FCR_BUILD_TESTS, FCR_BUILD_TOOLS, FCR_BUILD_EXAMPLES,
 FCR_BUILD_BENCHMARKS, FCR_WARNINGS_AS_ERRORS, FCR_ENABLE_ANALYZE, FCR_ENABLE_ASAN.
 MSVC builds use /W4 /permissive- with /WX and no warning is globally suppressed.
 FCR_ENABLE_ASAN=ON fails configure when the toolchain has no AddressSanitizer runtime
-instead of pretending to instrument.
+instead of pretending to instrument. The MSVC AddressSanitizer runtime is a DLL that
+lives inside the toolchain rather than in the system directory, so the test environment
+is given that directory and `ctest` runs an instrumented suite from an ordinary shell.
 
 ## Test
 
@@ -148,10 +150,43 @@ and fcr_publisher a real publisher worker process.
 * Retired generation identifier lists are in-memory only; digests and counts are durable.
 * Superseded evidence lineage is not persisted; stale-replay protection across a restart
   is carried by persisted source-generation floors.
-* AddressSanitizer is not installed in the reference build environment; /analyze and the
-  runtime checks are the available substitutes.
-* This revision has NOT passed its full validation suite; see the status report
-  accompanying the commit. It must not be treated as a closed 1.0.0 release.
+* The MSVC AddressSanitizer runtime ships only in its dynamic form with the reference
+  toolchain, so an instrumented executable started by hand outside `ctest` needs the
+  toolchain's runtime directory on `PATH`. The test environment is given that directory
+  automatically.
+* Two shipped surfaces are exercised by the release procedure rather than by `ctest`: the
+  ten examples are built and executed as a step, and the installed package is consumed by
+  an independent downstream project built from `tests/consumer`.
+
+## Validation status
+
+This revision is the closure revision. Every applicable proof was executed on the exact
+committed revision and repeated on a fresh clone of it.
+
+| Proof | Result |
+| --- | --- |
+| Release `ctest`, 17 suites | 17/17 passed, no timeout |
+| Debug `ctest`, 17 suites | 17/17 passed, no timeout |
+| Release `ctest` under AddressSanitizer, 17 suites | 17/17 passed, no sanitizer report |
+| MSVC `/analyze`, Release | 0 first-party findings |
+| First-party compiler warnings, Release / Debug / ASan | 0 |
+| Distributed worker death and coordinator restart, real processes | passed |
+| `cmake --install` | succeeded |
+| Independent consumer from installed artifacts only | configured, built, ran |
+| Examples | 10/10 exited 0 |
+| Orphan processes left by the suite | 0 |
+
+The `coordinator_restart` suite takes about 61 seconds by design: it establishes that a
+holding publisher is still running by waiting out that publisher's full bounded
+hold-verification interval before killing it as a real operating system process.
+
+Benchmarks report completed operations only, counted after each operation returned
+successfully, and every measurement prints a verification line. On the reference machine
+(x64, MSVC 19.44, Release, 1000 entities) the measured completed-operation rates are
+28,322/s for full-snapshot publication, 513,696/s for lookup by entity and capability,
+220,420/s for compatibility requirement evaluation, 3,858/s for canonical digest
+computation, 62/s for mass source invalidation across 5000 records and 299/s for
+publisher fencing.
 
 ## License
 

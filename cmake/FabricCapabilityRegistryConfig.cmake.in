@@ -8,6 +8,18 @@ endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/FabricCapabilityRegistryTargets.cmake")
 
+# The documented and consumed name is SummonSoftwareLabs::FabricCapabilityRegistry.
+# Because ALIAS targets are never exported, that name only exists in an installed
+# package while the library sets EXPORT_NAME. Without this check a drift in that
+# property surfaces at link time as a misleading "a find_package call is missing"
+# error, which points at the consumer instead of at the package.
+if(NOT TARGET SummonSoftwareLabs::FabricCapabilityRegistry)
+  set(FabricCapabilityRegistry_FOUND FALSE)
+  set(FabricCapabilityRegistry_NOT_FOUND_MESSAGE
+      "The installed FabricCapabilityRegistry package did not define the documented target SummonSoftwareLabs::FabricCapabilityRegistry.")
+  return()
+endif()
+
 check_required_components(FabricCapabilityRegistry)
 
 set(FabricCapabilityRegistry_VERSION "@PROJECT_VERSION@")

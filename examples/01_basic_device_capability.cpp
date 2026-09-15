@@ -76,7 +76,9 @@ PublicationRequest Request(const AuthorityGrant& grant, const WorkerBootId& boot
 
 int main() {
   CapabilityRegistry registry;
-  const AuthorityGrant grant = ExampleGrant({"fabric.port", "fabric.forwarding"});
+  // The grant has to name every namespace this example publishes into: authority is
+  // explicit and enumerative, so a claim outside the grant is rejected outright.
+  const AuthorityGrant grant = ExampleGrant({"fabric.port", "fabric.forwarding", "fabric.queue"});
   if (!registry.DeclareAuthority(grant).HasValue()) return 1;
   const WorkerBootId boot = *WorkerBootId::Parse("0102030405060708090a0b0c0d0e0f10");
   if (!registry.RegisterPublisher(*PublisherId::Parse(kPublisher), grant.scope, boot).HasValue()) {

@@ -241,10 +241,15 @@ std::vector<PnpEntry> EnumeratePnpNetworkDevices(std::size_t max_devices) {
     if (SetupDiGetDeviceRegistryPropertyW(devices, &info, SPDRP_HARDWAREID, &type,
                                           reinterpret_cast<PBYTE>(multi), sizeof(multi),
                                           &required) != 0) {
-      const wchar_t* cursor = multi;
-      while (*cursor != L'\0' && entry.hardware_ids.size() < kMaxHardwareIds) {
-        entry.hardware_ids.push_back(Sanitize(Narrow(cursor, 64), 64));
-        cursor += std::wcslen(cursor) + 1;
+      // REG_MULTI_SZ is a run of NUL terminated strings closed by an empty one. The
+      // walk is bounded by the buffer extent as well as by the terminator, so a
+      // device that reports a value without that closing terminator can never make
+      // this read past the end of the buffer.
+      std::size_t offset = 0;
+      while (offset < std::size(multi) && multi[offset] != L'\0' &&
+             entry.hardware_ids.size() < kMaxHardwareIds) {
+        entry.hardware_ids.push_back(Sanitize(Narrow(multi + offset, 64), 64));
+        offset += std::wcslen(multi + offset) + 1;
       }
     }
     if (!entry.instance_id.empty()) {

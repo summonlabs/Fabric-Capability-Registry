@@ -64,8 +64,25 @@ endif()
 if(FCR_ENABLE_ASAN)
   if(MSVC)
     include(CheckCXXSourceCompiles)
+    # The probe source must not contain a single backslash escape sequence. CMake
+    # expands escapes a second time when it materialises a try-compile translation
+    # unit, so an escape written here reaches the compiler as a literal control
+    # character and the probe fails to parse for a reason that has nothing to do
+    # with AddressSanitizer -- which would report a healthy toolchain as
+    # UNSUPPORTED forever. The probe below therefore contains no escapes at all
+    # and still performs the full compile and link of an instrumented program,
+    # which is what actually proves the AddressSanitizer runtime is present. The
+    # guard makes that failure mode impossible to reintroduce silently rather than
+    # merely documenting it.
+    set(FCR_MSVC_ASAN_PROBE_SOURCE "int main(){return 0;}")
+    if(FCR_MSVC_ASAN_PROBE_SOURCE MATCHES "\\\\")
+      message(FATAL_ERROR
+        "FCR_MSVC_ASAN_PROBE_SOURCE must stay free of backslash escape sequences: CMake "
+        "expands them a second time when it writes the try-compile translation unit, which "
+        "makes this probe fail for a reason unrelated to AddressSanitizer.")
+    endif()
     set(CMAKE_REQUIRED_FLAGS "/fsanitize=address")
-    check_cxx_source_compiles("#include <cstdio>\nint main(){std::printf(\"asan probe\\n\");return 0;}" FCR_MSVC_ASAN_AVAILABLE)
+    check_cxx_source_compiles("${FCR_MSVC_ASAN_PROBE_SOURCE}" FCR_MSVC_ASAN_AVAILABLE)
     unset(CMAKE_REQUIRED_FLAGS)
     if(NOT FCR_MSVC_ASAN_AVAILABLE)
       message(FATAL_ERROR
@@ -73,8 +90,15 @@ if(FCR_ENABLE_ASAN)
         "Install the 'AddressSanitizer' component of the Visual Studio C++ workload, or "
         "configure with FCR_ENABLE_ASAN=OFF. AddressSanitizer is reported UNSUPPORTED in that case.")
     endif()
-    add_compile_options(/fsanitize=address)
-    add_link_options(/fsanitize=address)
+    # /fsanitize=address without debug information emission makes the compiler
+    # itself report C5072, which the /WX policy below turns into a hard build
+    # failure, and it also degrades every sanitizer report to bare addresses.
+    # The flag is a compiler option: the MSVC linker does not accept it and only
+    # warns LNK4044, because cl.exe already records the runtime dependency in the
+    # object's default-library directive. /DEBUG is what the linker asks for so
+    # that sanitizer reports can be symbolized.
+    add_compile_options(/fsanitize=address /Zi)
+    add_link_options(/DEBUG)
   else()
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=address)
@@ -129,8 +153,14 @@ set(FCR_SOURCES
 add_library(fabric_capability ${FCR_LIBRARY_TYPE} ${FCR_SOURCES} ${FCR_PUBLIC_HEADERS})
 add_library(SummonSoftwareLabs::FabricCapabilityRegistry ALIAS fabric_capability)
 
+# EXPORT_NAME is what the installed package advertises. The
+# SummonSoftwareLabs::FabricCapabilityRegistry name in this build tree is an ALIAS,
+# and ALIAS targets are never exported, so without this property the installed
+# package would define SummonSoftwareLabs::fabric_capability instead and every
+# consumer written against the documented name would fail to link.
 set_target_properties(fabric_capability PROPERTIES
   OUTPUT_NAME FabricCapabilityRegistry
+  EXPORT_NAME FabricCapabilityRegistry
   CXX_STANDARD 20
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS OFF
@@ -231,9 +261,25 @@ if(FCR_BUILD_TESTS)
     concurrency property adversarial discovery synthetic wire
     distributed coordinator_restart cli)
 
+  set(FCR_TEST_NAMES)
   foreach(suite IN LISTS FCR_TEST_SUITES)
     add_test(NAME fcr.${suite} COMMAND fcr_tests --filter=${suite})
+    list(APPEND FCR_TEST_NAMES fcr.${suite})
   endforeach()
+
+  if(FCR_ENABLE_ASAN AND MSVC)
+    # This toolchain ships only the dynamic AddressSanitizer runtime, as a DLL that
+    # lives next to the compiler rather than in the system directory, and Windows
+    # resolves DLLs through PATH. A test run launched from an ordinary shell
+    # therefore fails to start every instrumented executable with 0xC0000135
+    # (STATUS_DLL_NOT_FOUND), which would report a toolchain deployment detail as
+    # seventeen product failures. The runtime directory is prepended to the test
+    # environment instead; child processes inherit it, so the real coordinator and
+    # publisher processes resolve the same runtime.
+    get_filename_component(FCR_ASAN_RUNTIME_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set_tests_properties(${FCR_TEST_NAMES} PROPERTIES
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${FCR_ASAN_RUNTIME_DIR}")
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -273,7 +319,8 @@ install(EXPORT FabricCapabilityRegistryTargets
 configure_package_config_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FabricCapabilityRegistryConfig.cmake.in
   ${CMAKE_CURRENT_BINARY_DIR}/FabricCapabilityRegistryConfig.cmake
-  INSTALL_DESTINATION ${FCR_CMAKE_CONFIG_DESTINATION})
+  INSTALL_DESTINATION ${FCR_CMAKE_CONFIG_DESTINATION}
+  PATH_VARS CMAKE_INSTALL_INCLUDEDIR)
 
 write_basic_package_version_file(
   ${CMAKE_CURRENT_BINARY_DIR}/FabricCapabilityRegistryConfigVersion.cmake

@@ -92,7 +92,10 @@ class RawClient {
   explicit RawClient(std::uint16_t port) {
 #if defined(_WIN32)
     WSADATA data{};
-    WSAStartup(MAKEWORD(2, 2), &data);
+    // A failed winsock startup leaves the socket invalid, which the caller reports as an
+    // explicit test failure instead of as a mysterious connection refusal.
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return;
+    winsock_started_ = true;
     socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 #else
     socket_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -121,15 +124,24 @@ class RawClient {
   }
 
   void Close() {
-    if (socket_ == kInvalid) return;
+    if (socket_ != kInvalid) {
 #if defined(_WIN32)
-    shutdown(socket_, SD_BOTH);
-    closesocket(socket_);
+      shutdown(socket_, SD_BOTH);
+      closesocket(socket_);
 #else
-    ::shutdown(socket_, SHUT_RDWR);
-    ::close(socket_);
+      ::shutdown(socket_, SHUT_RDWR);
+      ::close(socket_);
 #endif
-    socket_ = kInvalid;
+      socket_ = kInvalid;
+    }
+#if defined(_WIN32)
+    // WSAStartup is reference counted, so the successful startup above is released here
+    // exactly once and the helper stays balanced.
+    if (winsock_started_) {
+      WSACleanup();
+      winsock_started_ = false;
+    }
+#endif
   }
 
  private:
@@ -141,6 +153,9 @@ class RawClient {
   static constexpr Handle kInvalid = -1;
 #endif
   Handle socket_ = kInvalid;
+#if defined(_WIN32)
+  bool winsock_started_ = false;
+#endif
 };
 
 }  // namespace
