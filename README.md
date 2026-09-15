@@ -181,12 +181,15 @@ holding publisher is still running by waiting out that publisher's full bounded
 hold-verification interval before killing it as a real operating system process.
 
 Benchmarks report completed operations only, counted after each operation returned
-successfully, and every measurement prints a verification line. On the reference machine
-(x64, MSVC 19.44, Release, 1000 entities) the measured completed-operation rates are
-28,322/s for full-snapshot publication, 513,696/s for lookup by entity and capability,
-220,420/s for compatibility requirement evaluation, 3,858/s for canonical digest
-computation, 62/s for mass source invalidation across 5000 records and 299/s for
-publisher fencing.
+successfully, and every measurement prints a verification line stating how many
+operations actually completed: 1000 full-snapshot publications, 4000 lookups by entity
+and capability, 20 reverse lookups, 1000 compatibility requirement evaluations, 20
+canonical digests, 5 snapshot diffs, one mass source invalidation covering 5000 records
+and one publisher fence. Those counts are deterministic; throughput is not, because it
+depends on the machine and its load. On the reference machine (x64, MSVC 19.44, Release,
+1000 entities) the completed-operation rates observed across runs were approximately
+25k-29k publications/s, 0.4M-0.5M lookups/s, 0.19M-0.22M requirement evaluations/s,
+3.8k-3.9k digests/s, 55-62 invalidations/s and 229-299 fences/s.
 
 ## License
 
