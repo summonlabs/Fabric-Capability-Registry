@@ -6,7 +6,9 @@
 // publisher processes that are killed with TerminateProcess. Nothing here is
 // simulated in process.
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fabric/capability/fabric_capability.hpp"
@@ -78,10 +80,16 @@ bool CoordinatorReachable(std::uint16_t port, const std::string& publisher,
 }
 
 bool WaitForCoordinator(std::uint16_t port) {
-  for (int attempt = 0; attempt < 200; ++attempt) {
+  // Bounded in time, not in attempts: a refused loopback connection returns immediately, so
+  // a fixed attempt count would make readiness a bet on how fast the process starts and on
+  // how loaded the machine is. The bound is generous but it is still a bound, and failure is
+  // reported rather than skipped.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (std::chrono::steady_clock::now() < deadline) {
     // A throwaway boot identity: probing fences the boot it uses, so it must never be a boot
     // a real publisher depends on.
     if (CoordinatorReachable(port, "pub-a", "0000000000000000ffffffffffffffff")) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return false;
 }
@@ -184,9 +192,14 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
   // Fencing is observed through the real control path with an in-process client: the
   // coordinator refuses the dead boot once it has processed the broken connection.
   bool fenced = false;
-  for (int attempt = 0; attempt < 400 && !fenced; ++attempt) {
+  const auto fence_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (!fenced && std::chrono::steady_clock::now() < fence_deadline) {
     const auto outcome = Handshake(cluster.port, "pub-a", boot_a);
-    if (!outcome.HasValue() && outcome.Code() == ErrorCode::WorkerBootFenced) fenced = true;
+    if (!outcome.HasValue() && outcome.Code() == ErrorCode::WorkerBootFenced) {
+      fenced = true;
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
   }
   FCR_CHECK(fenced);
 

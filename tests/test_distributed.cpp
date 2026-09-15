@@ -2,6 +2,7 @@
 // Copyright 2026 Summon Software Labs.
 // Licensed under the Apache License, Version 2.0.
 
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -348,10 +349,14 @@ FCR_TEST(distributed, concurrent_publishers_and_repeated_lifecycle) {
   // Killing a connection fences the boot and makes process evidence non-current.
   const WorkerBootId killed = Boot(40);
   clients[0]->Close();
-  // The coordinator notices the closed connection and fences it.
-  for (int attempt = 0; attempt < 200 && !coordinator.Registry().IsWorkerBootFenced(killed);
-       ++attempt) {
-    std::this_thread::yield();
+  // The coordinator notices the closed connection asynchronously and fences the boot.
+  // The wait is bounded in time rather than in iterations: a spin count is a bet on
+  // machine speed, and under instrumentation or load the detection thread needs longer
+  // than any fixed number of yields, which would report a stopwatch as a product failure.
+  const auto fence_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (!coordinator.Registry().IsWorkerBootFenced(killed) &&
+         std::chrono::steady_clock::now() < fence_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   FCR_CHECK(coordinator.Registry().IsWorkerBootFenced(killed));
   auto after = coordinator.Registry().Query(Entity("nic:concurrent-0"),
