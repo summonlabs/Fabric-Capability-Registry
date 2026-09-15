@@ -1,0 +1,18 @@
+# Build outputs
+/build/
+/build-*/
+/out/
+/install/
+/artifacts/
+*.user
+.vs/
+.vscode/
+CMakeUserPresets.json
+
+# Runtime debris
+*.log
+*.dmp
+*.tmp
+*.fcrstore
+/fcr-store/
+/scratch/
