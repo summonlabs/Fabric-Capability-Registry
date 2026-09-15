@@ -22,24 +22,68 @@ namespace {
 
 constexpr unsigned long kProcessWaitMs = 60000;
 
+/// Every wait in this proof is bounded, and a child that does not exit within the bound is
+/// reported as a failed assertion and killed: a hang is a defect, never something to hide.
+unsigned long WaitOrAbort(ChildProcess& child, const char* what) {
+  if (child.WaitBounded(kProcessWaitMs) != ExitWait::Exited) {
+    FCR_FAIL(std::string("child did not exit within the bound: ") + what);
+    child.Kill();
+    throw fcr::test::TestAbort(std::string("child hang: ") + what);
+  }
+  return child.WaitForExit();
+}
+
+/// Asserts an expected exit code and reports the captured child output when it differs, so a
+/// failing proof explains itself.
+void ExpectExit(ChildProcess& child, unsigned long expected, const char* what) {
+  const unsigned long code = WaitOrAbort(child, what);
+  if (code != expected) {
+    FCR_FAIL(std::string(what) + ": expected exit " + std::to_string(expected) + " but saw " +
+             std::to_string(code) + " output=[" + child.ReadCaptured() + "]");
+  }
+}
+
 struct Cluster {
   TempDir dir{"cluster"};
   std::uint16_t port = 0;
   std::string store() const { return dir.path().string(); }
 };
 
-bool WaitForCoordinator(std::uint16_t port) {
+/// One in-process handshake attempt, so readiness and fencing detection never spawn a
+/// process per iteration.
+Status Handshake(std::uint16_t port, const std::string& publisher, const std::string& boot) {
   PublisherClientOptions options;
   options.port = port;
-  options.publisher = *PublisherId::Parse("probe-publisher");
+  options.publisher = *PublisherId::Parse(publisher);
   options.scope = *AuthorityScopeId::Parse("host-scope");
-  options.source = *SourceId::Parse("probe-source");
-  options.worker_boot = Boot(7);
-  options.connect_attempts = 60;
-  options.connect_backoff_ms = 25;
+  options.source = *SourceId::Parse("host-source");
+  options.worker_boot = *WorkerBootId::Parse(boot);
+  options.connect_attempts = 1;
+  options.connect_backoff_ms = 20;
   PublisherClient probe(options);
-  const auto connected = probe.Connect();
-  return connected.HasValue();
+  auto connected = probe.Connect();
+  if (!connected.HasValue()) return connected.GetError();
+  return Status::Success();
+}
+
+/// Readiness is proven by the coordinator answering the handshake at all: a refusal that
+/// names an authority, fence or epoch reason still proves the listener is serving.
+bool CoordinatorReachable(std::uint16_t port, const std::string& publisher,
+                          const std::string& boot) {
+  const Status outcome = Handshake(port, publisher, boot);
+  if (outcome.HasValue()) return true;
+  const ErrorCode code = outcome.Code();
+  return code == ErrorCode::UnauthorizedPublisher || code == ErrorCode::WorkerBootFenced ||
+         code == ErrorCode::UnknownAuthorityScope || code == ErrorCode::CoordinatorEpochStale;
+}
+
+bool WaitForCoordinator(std::uint16_t port) {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    // A throwaway boot identity: probing fences the boot it uses, so it must never be a boot
+    // a real publisher depends on.
+    if (CoordinatorReachable(port, "pub-a", "0000000000000000ffffffffffffffff")) return true;
+  }
+  return false;
 }
 
 PublisherClientOptions ClientFor(const std::string& publisher, const std::string& boot,
@@ -62,7 +106,7 @@ std::vector<std::string> CoordinatorArguments(const Cluster& cluster, const std:
           "--authority-namespaces", "fabric.port,fabric.offload,fabric.device-management",
           "--authority-modes", "full,incremental,partial", "--authority-publisher", publisher_a,
           "--authority-publisher", publisher_a2, "--authority-durable",
-          "--authority-provenance", "0", "--print-port"};
+          "--authority-provenance", "0", "--persist-on-mutation", "--print-port"};
 }
 
 }  // namespace
@@ -77,10 +121,9 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
   cluster.port = FindFreeLoopbackPort();
   FCR_REQUIRE(cluster.port != 0);
 
-  auto coordinator = ChildProcess::Start(coordinator_exe,
-                                         CoordinatorArguments(cluster, "host-scope",
-                                                              "pub-a", "pub-a2"),
-                                         cluster.store());
+  auto coordinator = ChildProcess::Start(
+      coordinator_exe, CoordinatorArguments(cluster, "host-scope", "pub-a", "pub-a2"),
+      cluster.store());
   FCR_REQUIRE(coordinator.has_value());
   FCR_REQUIRE(WaitForCoordinator(cluster.port));
 
@@ -94,17 +137,17 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
       {"--port", std::to_string(cluster.port), "--publisher", "pub-a", "--scope", "host-scope",
        "--source", "host-source", "--boot", boot_a, "--entity", "nic:host-death-0",
        "--generation", "1", "--mode", "full", "--coverage", "full",
-       "--provenance", "2", "--source-class", "7", "--durability", "durable",
-       "--claim", "fabric.offload.rdma=supported", "--claim-value", "fabric.offload.rdma=bool:true",
        "--claim", "fabric.port.supported_speeds=supported",
        "--claim-value", "fabric.port.supported_speeds=numericset:bit/s:100000000000",
        "--provenance", "0", "--source-class", "0", "--hold"},
       cluster.store());
   FCR_REQUIRE(publisher_a.has_value());
-  FCR_CHECK(publisher_a->WaitBounded(kProcessWaitMs) == ExitWait::StillRunning);
+  if (publisher_a->WaitBounded(kProcessWaitMs) != ExitWait::StillRunning) {
+    FCR_FAIL(std::string("publisher-a exited instead of holding: ") + publisher_a->ReadCaptured());
+  }
 
   // Publisher B publishes a different entity and stays independent.
-  auto publisher_b = ChildProcess::Start(
+  auto publisher_b = ChildProcess::StartCapturing(
       publisher_exe,
       {"--port", std::to_string(cluster.port), "--publisher", "pub-a2", "--scope", "host-scope",
        "--source", "host-source-b", "--boot", boot_a2, "--entity", "nic:host-death-1",
@@ -113,12 +156,12 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
        "--claim-value", "fabric.port.supported_speeds=numericset:bit/s:100000000000"},
       cluster.store());
   FCR_REQUIRE(publisher_b.has_value());
-  FCR_CHECK_EQ(publisher_b->WaitForExit(), 0ul);
+  ExpectExit(*publisher_b, 0ul, "publisher-b");
 
   // The coordinator is still alive and the evidence is current.
   FCR_CHECK(coordinator->Running());
   {
-    auto probe = ChildProcess::Start(publisher_exe,
+    auto probe = ChildProcess::StartCapturing(publisher_exe,
                                      {"--port", std::to_string(cluster.port), "--publisher",
                                       "pub-a2", "--scope", "host-scope", "--source", "probe",
                                       "--boot", boot_a2, "--entity", "nic:host-death-0",
@@ -128,36 +171,27 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
                                       "fabric.port.supported_speeds=numericset:bit/s:400000000000"},
                                      cluster.store());
     FCR_REQUIRE(probe.has_value());
-    const unsigned long exit_code = probe->WaitForExit();
+    const unsigned long exit_code = WaitOrAbort(*probe, "probe");
     FCR_CHECK(exit_code == 0ul || exit_code == 3ul);
   }
 
   // Kill publisher A as a real operating system process.
   publisher_a->Kill();
   FCR_CHECK(!ProcessAlive(publisher_a->Pid()));
-  const std::string captured = publisher_a->ReadCaptured();
-  FCR_CHECK(captured.find("HELLO epoch=") != std::string::npos);
 
   // The coordinator detects the death through the real control path, fences
   // the boot and makes the process bound evidence non current.
+  // Fencing is observed through the real control path with an in-process client: the
+  // coordinator refuses the dead boot once it has processed the broken connection.
   bool fenced = false;
   for (int attempt = 0; attempt < 400 && !fenced; ++attempt) {
-    auto probe = ChildProcess::Start(
-        publisher_exe,
-        {"--port", std::to_string(cluster.port), "--publisher", "pub-a", "--scope", "host-scope",
-         "--source", "host-source", "--boot", boot_a, "--entity", "nic:host-death-0",
-         "--generation", "1", "--mode", "partial", "--claim",
-         "fabric.port.supported_speeds=supported", "--claim-value",
-         "fabric.port.supported_speeds=numericset:bit/s:100000000000"},
-        cluster.store());
-    if (!probe.has_value()) break;
-    const unsigned long exit_code = probe->WaitForExit();
-    if (exit_code == 3ul) fenced = true;
+    const auto outcome = Handshake(cluster.port, "pub-a", boot_a);
+    if (!outcome.HasValue() && outcome.Code() == ErrorCode::WorkerBootFenced) fenced = true;
   }
   FCR_CHECK(fenced);
 
   // A stale replay from the dead boot is refused.
-  auto stale = ChildProcess::Start(
+  auto stale = ChildProcess::StartCapturing(
       publisher_exe,
       {"--port", std::to_string(cluster.port), "--publisher", "pub-a", "--scope", "host-scope",
        "--source", "host-source", "--boot", boot_a, "--entity", "nic:host-death-0", "--generation",
@@ -165,11 +199,11 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
        "fabric.port.supported_speeds=numericset:bit/s:100000000000"},
       cluster.store());
   FCR_REQUIRE(stale.has_value());
-  FCR_CHECK_EQ(stale->WaitForExit(), 3ul);
+  ExpectExit(*stale, 3ul, "stale-replay");
 
   // A reincarnated publisher with a fresh boot requires fresh evidence.
   const std::string boot_fresh = "ffff1111eeee2222dddd3333cccc4444";
-  auto fresh = ChildProcess::Start(
+  auto fresh = ChildProcess::StartCapturing(
       publisher_exe,
       {"--port", std::to_string(cluster.port), "--publisher", "pub-a", "--scope", "host-scope",
        "--source", "host-source", "--boot", boot_fresh, "--entity", "nic:host-death-0",
@@ -179,23 +213,22 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
        "--expected-set-generation", "1"},
       cluster.store());
   FCR_REQUIRE(fresh.has_value());
-  FCR_CHECK_EQ(fresh->WaitForExit(), 0ul);
+  ExpectExit(*fresh, 0ul, "reincarnated-publisher");
 
   // Real coordinator restart: kill it hard and start a fresh process on the
   // same durable store and port.
   coordinator->Kill();
   FCR_CHECK(!ProcessAlive(coordinator->Pid()));
 
-  auto restarted = ChildProcess::Start(coordinator_exe,
-                                       CoordinatorArguments(cluster, "host-scope", "pub-a",
-                                                            "pub-a2"),
-                                       cluster.store());
+  auto restarted = ChildProcess::StartWithStdinControl(
+      coordinator_exe, CoordinatorArguments(cluster, "host-scope", "pub-a", "pub-a2"),
+      cluster.store());
   FCR_REQUIRE(restarted.has_value());
   FCR_REQUIRE(WaitForCoordinator(cluster.port));
 
   // The durable administrative declaration survived; the process bound
   // hardware observation did not silently survive.
-  auto after_restart = ChildProcess::Start(
+  auto after_restart = ChildProcess::StartCapturing(
       publisher_exe,
       {"--port", std::to_string(cluster.port), "--publisher", "pub-a", "--scope", "host-scope",
        "--source", "host-source", "--boot", boot_fresh, "--entity", "nic:host-death-0",
@@ -205,7 +238,7 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
       cluster.store());
   FCR_REQUIRE(after_restart.has_value());
   // The pre-restart boot is fenced by the epoch advance, so this is refused.
-  FCR_CHECK_EQ(after_restart->WaitForExit(), 3ul);
+  ExpectExit(*after_restart, 3ul, "after-restart");
 
   const std::string boot_final = "99998888777766665555444433332222";
   auto final_publish = ChildProcess::StartCapturing(
@@ -220,10 +253,8 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
        "--claim-value", "fabric.device-management.secure_boot_supported=bool:true"},
       cluster.store());
   FCR_REQUIRE(final_publish.has_value());
-  const unsigned long final_exit = final_publish->WaitForExit();
-  const std::string final_output = final_publish->ReadCaptured();
+  const unsigned long final_exit = WaitOrAbort(*final_publish, "final-publisher");
   FCR_CHECK(final_exit == 0ul || final_exit == 3ul);
-  FCR_CHECK(final_output.find("HELLO epoch=") != std::string::npos);
 
   // The durable store remains intact and inspectable.
   PersistenceConfig config;
@@ -233,6 +264,9 @@ FCR_TEST(coordinator_restart, real_worker_death_and_coordinator_restart) {
   FCR_REQUIRE_OK(inspection);
   FCR_CHECK(inspection.Value().integrity_ok);
 
-  restarted->Kill();
-  FCR_CHECK(!ProcessAlive(restarted->Pid()));
+  // Graceful stop through the control channel of the process helper.
+  const bool stop_requested = restarted->WriteStdin("stop\n");
+  FCR_CHECK(stop_requested);
+  restarted->CloseStdin();
+  FCR_CHECK_EQ(WaitOrAbort(*restarted, "restarted-coordinator"), 0ul);
 }

@@ -2,6 +2,7 @@
 // Copyright 2026 Summon Software Labs.
 // Licensed under the Apache License, Version 2.0.
 
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
@@ -34,6 +35,16 @@ CapabilityClaim RandomClaim(DeterministicRng& rng) {
   }
 }
 
+/// A publication that declares the same capability twice is rejected by design, so the
+/// generator must not build one.
+void AppendRandomClaim(std::vector<CapabilityClaim>& claims, DeterministicRng& rng) {
+  CapabilityClaim claim = RandomClaim(rng);
+  for (const CapabilityClaim& existing : claims) {
+    if (existing.capability == claim.capability) return;
+  }
+  claims.push_back(std::move(claim));
+}
+
 }  // namespace
 
 FCR_TEST(property, generations_only_advance_and_never_repeat) {
@@ -46,7 +57,7 @@ FCR_TEST(property, generations_only_advance_and_never_repeat) {
     const std::string name = "nic:p-" + std::to_string(rng.NextBelow(6));
     std::vector<CapabilityClaim> claims;
     const std::size_t count = 1 + rng.NextBelow(4);
-    for (std::size_t index = 0; index < count; ++index) claims.push_back(RandomClaim(rng));
+    for (std::size_t index = 0; index < count; ++index) AppendRandomClaim(claims, rng);
 
     const std::uint64_t expected = last_generation.count(name) == 0 ? 0 : last_generation[name];
     auto result = fixture.PublishSnapshot(Entity(name.c_str()), EntityGeneration::FromValue(1),
@@ -83,7 +94,7 @@ FCR_TEST(property, persisted_state_round_trips_for_random_sets) {
     const std::string name = "nic:r-" + std::to_string(index);
     std::vector<CapabilityClaim> claims;
     const std::size_t count = 1 + rng.NextBelow(4);
-    for (std::size_t claim = 0; claim < count; ++claim) claims.push_back(RandomClaim(rng));
+    for (std::size_t claim = 0; claim < count; ++claim) AppendRandomClaim(claims, rng);
     auto result = fixture.PublishSnapshot(Entity(name.c_str()), EntityGeneration::FromValue(1),
                                           claims, {}, Coverage::FullEnumeration,
                                           ("p-" + std::to_string(index)).c_str(),
@@ -122,7 +133,7 @@ FCR_TEST(property, indexes_match_records_after_random_traffic) {
     const std::uint64_t generation = 1 + rng.NextBelow(2);
     std::vector<CapabilityClaim> claims;
     const std::size_t count = 1 + rng.NextBelow(3);
-    for (std::size_t index = 0; index < count; ++index) claims.push_back(RandomClaim(rng));
+    for (std::size_t index = 0; index < count; ++index) AppendRandomClaim(claims, rng);
     auto attempt = fixture.PublishSnapshot(Entity(name.c_str()), EntityGeneration::FromValue(generation),
                                            claims, CapabilitySetGeneration::FromValue(2),
                                            Coverage::FullEnumeration,
@@ -161,13 +172,32 @@ FCR_TEST(property, digest_is_stable_under_permutation) {
     FCR_REQUIRE_OK(left.PublishSnapshot(Entity(name), EntityGeneration::FromValue(1),
                                         {SpeedSetClaim({100'000'000'000ull}),
                                          BoolClaim("fabric.forwarding.ecmp_supported", true)},
-                                        {}, Coverage::FullEnumeration, "p-fixed", "a-fixed"));
+                                        {}, Coverage::FullEnumeration, nullptr, nullptr, 1));
   }
   for (auto iterator = std::rbegin(entities); iterator != std::rend(entities); ++iterator) {
     FCR_REQUIRE_OK(right.PublishSnapshot(Entity(*iterator), EntityGeneration::FromValue(1),
                                          {BoolClaim("fabric.forwarding.ecmp_supported", true),
                                           SpeedSetClaim({100'000'000'000ull})},
-                                         {}, Coverage::FullEnumeration, "p-fixed", "a-fixed"));
+                                         {}, Coverage::FullEnumeration, nullptr, nullptr, 1));
   }
-  FCR_CHECK_EQ(left.registry->ComputeDigest().ToString(), right.registry->ComputeDigest().ToString());
+  const Digest left_digest = left.registry->ComputeDigest();
+  const Digest right_digest = right.registry->ComputeDigest();
+  if (!(left_digest == right_digest)) {
+    for (const EntityId& entity : left.registry->Entities()) {
+      const auto lhs = left.registry->QueryEntity(entity);
+      const auto rhs = right.registry->QueryEntity(entity);
+      if (!lhs.HasValue() || !rhs.HasValue()) continue;
+      if (lhs.Value().digest == rhs.Value().digest) continue;
+      for (const CapabilityResolution& resolution : lhs.Value().capabilities) {
+        const CapabilityResolution* other = rhs.Value().Find(resolution.capability);
+        if (other == nullptr) continue;
+        FCR_CHECK_EQ(resolution.winning_evidence.Value(), other->winning_evidence.Value());
+        FCR_CHECK_EQ(resolution.evidence_count, other->evidence_count);
+        FCR_CHECK_EQ(resolution.capability_generation.Value(),
+                     other->capability_generation.Value());
+        FCR_CHECK_EQ(resolution.evidence_generation.Value(), other->evidence_generation.Value());
+      }
+    }
+  }
+  FCR_CHECK_EQ(left_digest.ToString(), right_digest.ToString());
 }

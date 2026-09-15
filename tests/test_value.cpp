@@ -124,7 +124,8 @@ FCR_TEST(value, protocol_and_enumeration_sets) {
                                             ProtocolId::Vlan};
   auto set = CapabilityValue::ProtocolSetValue(unique);
   FCR_REQUIRE_OK(set);
-  FCR_CHECK_EQ(set.Value().ToText(), std::string("{ethernet, vlan, ipv6}"));
+  // Canonical ordering follows the protocol identifier ordering, not the input order.
+  FCR_CHECK_EQ(set.Value().ToText(), std::string("{ethernet, ipv6, vlan}"));
   FCR_CHECK(RoundTrip(set.Value()) == set.Value());
   const std::array<ProtocolId, 1> unknown = {ProtocolId::Unknown};
   FCR_CHECK_CODE(CapabilityValue::ProtocolSetValue(unknown), ErrorCode::UnknownEnumDomain);

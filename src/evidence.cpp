@@ -204,7 +204,7 @@ std::string EvidenceRecord::ToText() const {
 EvidenceId MakeEvidenceId(const PublisherId& publisher, const WorkerBootId& boot,
                           const MutationAttemptId& attempt, const EntityId& entity,
                           EntityGeneration entity_generation, const CapabilityId& capability,
-                          std::uint32_t ordinal) {
+                          std::uint64_t evidence_generation) {
   std::vector<std::byte> bytes;
   bytes.reserve(192);
   ByteWriter writer(bytes);
@@ -214,7 +214,7 @@ EvidenceId MakeEvidenceId(const PublisherId& publisher, const WorkerBootId& boot
   writer.Text(entity.ToString(), limits::kMaxEntityIdLength);
   writer.U64(entity_generation.Value());
   writer.Text(capability.ToString(), limits::kMaxCapabilityIdLength);
-  writer.U32(ordinal);
+  writer.U64(evidence_generation);
   const Digest digest = ComputeDigest(bytes);
   auto parsed = EvidenceId::Parse(digest.ShortString());
   return parsed.HasValue() ? parsed.Value() : EvidenceId{};

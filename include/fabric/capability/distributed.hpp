@@ -35,7 +35,7 @@ namespace fabric::capability {
 ///   12      8     request id
 ///   20      4     payload length
 ///   24      ...   payload
-///   24+n    4     CRC-32 of the payload
+///   24+n    4     CRC-32 of the header prefix (magic through payload length) and the payload
 ///
 /// A frame with trailing bytes after the declared payload and CRC is
 /// rejected. The payload length is bounded by limits::kMaxFrameBytes.

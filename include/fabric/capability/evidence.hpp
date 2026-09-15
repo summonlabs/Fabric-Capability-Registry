@@ -155,12 +155,14 @@ struct EvidenceRecord {
 
 using EvidencePtr = std::shared_ptr<const EvidenceRecord>;
 
-/// Deterministic evidence identifier derived from the publishing identity and
-/// the semantic position of the observation.
+/// Deterministic evidence identifier derived from the publishing identity and the
+/// evidence generation of the observation. The position of a claim inside a publication
+/// is deliberately not part of the identity, so the identifier - and therefore every
+/// digest derived from it - is independent of the order in which claims were submitted.
 EvidenceId MakeEvidenceId(const PublisherId& publisher, const WorkerBootId& boot,
                           const MutationAttemptId& attempt, const EntityId& entity,
                           EntityGeneration entity_generation, const CapabilityId& capability,
-                          std::uint32_t ordinal);
+                          std::uint64_t evidence_generation);
 
 /// Deterministic capability record identifier for an entity generation and
 /// capability.

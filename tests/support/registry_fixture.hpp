@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -85,20 +86,30 @@ struct Fixture {
   AuthorityScopeId scope() const { return grant.scope; }
 
   /// Publishes a full snapshot with the given claims.
+  /// Publication identifiers default to a unique pair per call so that unrelated
+  /// publications never collide on the replay cache. A test that exercises replay
+  /// pins the same identifiers explicitly.
   Outcome<PublicationResult> PublishSnapshot(const EntityId& entity, EntityGeneration generation,
                                              std::vector<CapabilityClaim> claims,
                                              CapabilitySetGeneration expected = {},
                                              Coverage coverage = Coverage::FullEnumeration,
-                                             const char* publication = "p-1",
-                                             const char* attempt = "a-1") {
+                                             const char* publication = nullptr,
+                                             const char* attempt = nullptr,
+                                             std::optional<std::uint64_t> pinned_source = {}) {
+    const std::uint64_t sequence = ++sequence_;
+    const std::string publication_text =
+        publication != nullptr ? std::string(publication) : "p-" + std::to_string(sequence);
+    const std::string attempt_text =
+        attempt != nullptr ? std::string(attempt) : "a-" + std::to_string(sequence);
     PublicationRequest request;
     request.mode = PublicationMode::FullSnapshot;
-    request.publication = *PublicationId::Parse(publication);
-    request.attempt = *MutationAttemptId::Parse(attempt);
+    request.publication = *PublicationId::Parse(publication_text);
+    request.attempt = *MutationAttemptId::Parse(attempt_text);
     request.epoch = registry->CurrentEpoch();
-    request.authority = AuthorityContext{grant.scope, publisher, boot,
-                                         *SourceId::Parse("test-source"),
-                                         SourceGeneration::FromValue(++source_generation)};
+    request.authority = AuthorityContext{
+        grant.scope, publisher, boot, *SourceId::Parse("test-source"),
+        SourceGeneration::FromValue(pinned_source.has_value() ? *pinned_source
+                                                             : ++source_generation)};
     request.entity = entity;
     request.entity_generation = generation;
     request.expected_set_generation = expected;
@@ -153,6 +164,7 @@ struct Fixture {
   PublisherId publisher = *PublisherId::Parse("test-publisher");
   WorkerBootId boot;
   std::uint64_t source_generation = 0;
+  std::uint64_t sequence_ = 0;
 };
 
 /// Claim builders used across the suites.

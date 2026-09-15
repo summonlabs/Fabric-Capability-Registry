@@ -109,9 +109,13 @@ void EnsureWinsock() {
 ChildProcess::~ChildProcess() { Release(); }
 
 ChildProcess::ChildProcess(ChildProcess&& other) noexcept
-    : process_(other.process_), capture_(other.capture_), pid_(other.pid_) {
+    : process_(other.process_),
+      capture_(other.capture_),
+      stdin_write_(other.stdin_write_),
+      pid_(other.pid_) {
   other.process_ = nullptr;
   other.capture_ = nullptr;
+  other.stdin_write_ = nullptr;
   other.pid_ = 0;
 }
 
@@ -120,9 +124,11 @@ ChildProcess& ChildProcess::operator=(ChildProcess&& other) noexcept {
     Release();
     process_ = other.process_;
     capture_ = other.capture_;
+    stdin_write_ = other.stdin_write_;
     pid_ = other.pid_;
     other.process_ = nullptr;
     other.capture_ = nullptr;
+    other.stdin_write_ = nullptr;
     other.pid_ = 0;
   }
   return *this;
@@ -138,6 +144,7 @@ void ChildProcess::Release() {
 #endif
     capture_ = nullptr;
   }
+  CloseStdin();
 }
 
 std::optional<ChildProcess> ChildProcess::Start(const std::string& executable,
@@ -187,7 +194,9 @@ std::optional<ChildProcess> ChildProcess::StartCapturing(const std::string& exec
   attributes.bInheritHandle = TRUE;
   HANDLE read_end = nullptr;
   HANDLE write_end = nullptr;
-  if (CreatePipe(&read_end, &write_end, &attributes, 0) == 0) {
+  // A capture buffer large enough for the largest deterministic CLI report, so a child can
+  // never block writing into a pipe the parent only drains after the child exits.
+  if (CreatePipe(&read_end, &write_end, &attributes, 1u << 20) == 0) {
     return std::nullopt;
   }
   SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
@@ -230,6 +239,82 @@ std::optional<ChildProcess> ChildProcess::StartCapturing(const std::string& exec
   (void)arguments;
   (void)working_directory;
   return std::nullopt;
+#endif
+}
+
+std::optional<ChildProcess> ChildProcess::StartWithStdinControl(
+    const std::string& executable, const std::vector<std::string>& arguments,
+    const std::string& working_directory) {
+#ifdef _WIN32
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.bInheritHandle = TRUE;
+  HANDLE read_end = nullptr;
+  HANDLE write_end = nullptr;
+  if (CreatePipe(&read_end, &write_end, &attributes, 0) == 0) {
+    return std::nullopt;
+  }
+  SetHandleInformation(write_end, HANDLE_FLAG_INHERIT, 0);
+
+  std::wstring command = QuoteArgument(Widen(executable));
+  for (const std::string& argument : arguments) {
+    command.push_back(L' ');
+    command.append(QuoteArgument(Widen(argument)));
+  }
+  std::wstring mutable_command = command;
+
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = read_end;
+  startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+  startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  PROCESS_INFORMATION info{};
+  const std::wstring directory = Widen(working_directory);
+  const BOOL ok = CreateProcessW(Widen(executable).c_str(), mutable_command.data(), nullptr,
+                                 nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                 directory.empty() ? nullptr : directory.c_str(), &startup,
+                                 &info);
+  CloseHandle(read_end);
+  if (ok == 0) {
+    CloseHandle(write_end);
+    return std::nullopt;
+  }
+  if (JobHandle() != nullptr) {
+    AssignProcessToJobObject(JobHandle(), info.hProcess);
+  }
+  ChildProcess child;
+  child.process_ = info.hProcess;
+  child.stdin_write_ = write_end;
+  child.pid_ = info.dwProcessId;
+  CloseHandle(info.hThread);
+  return child;
+#else
+  (void)executable;
+  (void)arguments;
+  (void)working_directory;
+  return std::nullopt;
+#endif
+}
+
+bool ChildProcess::WriteStdin(const std::string& text) {
+#ifdef _WIN32
+  if (stdin_write_ == nullptr) return false;
+  DWORD written = 0;
+  return WriteFile(static_cast<HANDLE>(stdin_write_), text.data(),
+                   static_cast<DWORD>(text.size()), &written, nullptr) != 0;
+#else
+  (void)text;
+  return false;
+#endif
+}
+
+void ChildProcess::CloseStdin() {
+#ifdef _WIN32
+  if (stdin_write_ != nullptr) {
+    CloseHandle(static_cast<HANDLE>(stdin_write_));
+    stdin_write_ = nullptr;
+  }
 #endif
 }
 

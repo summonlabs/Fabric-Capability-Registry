@@ -153,8 +153,10 @@ Digest ComputeDigest(std::string_view text) {
   return hasher.Finish();
 }
 
-std::uint32_t Crc32(std::span<const std::byte> data) {
-  std::uint32_t crc = 0xFFFFFFFFu;
+std::uint32_t Crc32Begin() noexcept { return 0xFFFFFFFFu; }
+
+std::uint32_t Crc32Extend(std::uint32_t state, std::span<const std::byte> data) noexcept {
+  std::uint32_t crc = state;
   for (const std::byte raw : data) {
     crc ^= static_cast<std::uint32_t>(static_cast<std::uint8_t>(raw));
     for (int bit = 0; bit < 8; ++bit) {
@@ -162,7 +164,13 @@ std::uint32_t Crc32(std::span<const std::byte> data) {
       crc = (crc >> 1) ^ (0xEDB88320u & mask);
     }
   }
-  return crc ^ 0xFFFFFFFFu;
+  return crc;
+}
+
+std::uint32_t Crc32Finish(std::uint32_t state) noexcept { return state ^ 0xFFFFFFFFu; }
+
+std::uint32_t Crc32(std::span<const std::byte> data) {
+  return Crc32Finish(Crc32Extend(Crc32Begin(), data));
 }
 
 static std::string RenderDigest(const std::array<std::byte, kDigestBytes>& bytes,

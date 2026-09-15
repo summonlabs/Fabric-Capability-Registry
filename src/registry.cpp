@@ -64,10 +64,12 @@ Digest DigestOfResolutions(const std::vector<CapabilityResolution>& resolutions)
     writer.U8(static_cast<std::uint8_t>(resolution.source_class));
     writer.U8(static_cast<std::uint8_t>(resolution.coverage));
     writer.U8(static_cast<std::uint8_t>(resolution.durability));
+    // Publisher-local source sequencing is deliberately excluded: the canonical digest
+    // must describe capability truth, not the bookkeeping order of one publisher.
     writer.U64(resolution.evidence_generation.Value());
-    writer.U64(resolution.source_generation.Value());
     writer.U64(resolution.capability_generation.Value());
-    writer.Text(resolution.winning_evidence.Value(), limits::kDigestIdLength);
+    // The winning evidence identifier is publisher-assigned bookkeeping: it identifies an
+    // observation, not the capability truth, so it is excluded from the canonical digest.
     writer.U32(static_cast<std::uint32_t>(resolution.evidence_count));
     writer.U32(static_cast<std::uint32_t>(resolution.current_evidence_count));
     writer.U32(static_cast<std::uint32_t>(resolution.outranked_evidence_count));
@@ -649,7 +651,9 @@ class CapabilityRegistry::Impl {
     writer.U8(static_cast<std::uint8_t>(request.mode));
     writer.Text(request.entity.ToString(), limits::kMaxEntityIdLength);
     writer.U64(request.entity_generation.Value());
-    writer.U64(request.expected_set_generation.Value());
+    // The expected capability set generation is a precondition, not mutation content: a
+    // duplicate of the same attempt that refreshed its precondition is still the same attempt
+    // and is answered from the replay cache instead of being applied again.
     writer.U8(static_cast<std::uint8_t>(request.coverage));
     writer.Text(request.authority.scope.Value(), limits::kMaxAuthorityScopeIdLength);
     writer.Text(request.authority.source.Value(), limits::kMaxSourceIdLength);
@@ -815,7 +819,7 @@ class CapabilityRegistry::Impl {
   }
 
   Status ApplyClaim(EntityState& entity, const CapabilityClaim& claim,
-                    const PublicationRequest& request, Coverage coverage, std::uint32_t ordinal,
+                    const PublicationRequest& request, Coverage coverage,
                     const ReasonToken& supersede_reason) {
     const std::uint32_t key = CapabilityKey(claim.capability);
     const bool is_new = entity.capabilities.find(key) == entity.capabilities.end();
@@ -879,7 +883,7 @@ class CapabilityRegistry::Impl {
     record->arrival_sequence = ++arrival_sequence_;
     record->id = MakeEvidenceId(request.authority.publisher, request.authority.worker_boot,
                                 request.attempt, entity.id, entity.bound_generation,
-                                claim.capability, ordinal);
+                                claim.capability, generation.Value());
 
     IndexEvidence(*record);
     entry.evidence.push_back(std::move(record));
@@ -1411,40 +1415,10 @@ class CapabilityRegistry::Impl {
       entity->touched_at = registry_generation_;
     }
 
-    // 7. source generation must not go backwards for this publishing identity
-    const SourceKey source_key{request.authority.source, request.authority.worker_boot};
-    {
-      const auto floor = entity->source_high_water.find(source_key);
-      if (floor != entity->source_high_water.end() &&
-          request.authority.source_generation.Value() < floor->second.Value()) {
-        return reject(ErrorCode::SourceGenerationStale,
-                      "the publication carries a stale source generation",
-                      "request=" + request.authority.source_generation.ToString() + " floor=" +
-                          floor->second.ToString());
-      }
-    }
 
-    // 8. expected capability set generation
-    if (entity->has_set) {
-      if (request.expected_set_generation.Value() < entity->set_generation.Value()) {
-        return reject(ErrorCode::CapabilitySetGenerationStale,
-                      "the publication expects a stale capability set generation",
-                      "expected=" + request.expected_set_generation.ToString() + " current=" +
-                          entity->set_generation.ToString());
-      }
-      if (request.expected_set_generation.Value() > entity->set_generation.Value()) {
-        return reject(ErrorCode::CapabilitySetGenerationMismatch,
-                      "the publication expects a capability set generation that does not exist",
-                      "expected=" + request.expected_set_generation.ToString() + " current=" +
-                          entity->set_generation.ToString());
-      }
-    } else if (request.expected_set_generation.Value() != 0) {
-      return reject(ErrorCode::CapabilitySetGenerationMismatch,
-                    "no capability set exists for this entity generation yet",
-                    "expected=" + request.expected_set_generation.ToString());
-    }
-
-    // 9. stale replay versus exact idempotent replay
+    // 7. duplicate attempt classification: an exact replay is answered from the replay
+    // cache and an already superseded attempt is rejected as a stale replay, both before any
+    // precondition check, so a replay is never misreported as a precondition failure.
     const std::string content_digest = DigestHex(RequestContentDigest(request, grant));
     if (!runtime.replay.empty()) {
       const ReplayRecord& latest = runtime.replay.back();
@@ -1494,10 +1468,42 @@ class CapabilityRegistry::Impl {
       }
     }
 
+    // 8. source generation must not go backwards for this publishing identity
+    const SourceKey source_key{request.authority.source, request.authority.worker_boot};
+    {
+      const auto floor = entity->source_high_water.find(source_key);
+      if (floor != entity->source_high_water.end() &&
+          request.authority.source_generation.Value() < floor->second.Value()) {
+        return reject(ErrorCode::SourceGenerationStale,
+                      "the publication carries a stale source generation",
+                      "request=" + request.authority.source_generation.ToString() + " floor=" +
+                          floor->second.ToString());
+      }
+    }
+
+    // 9. expected capability set generation
+    if (entity->has_set) {
+      if (request.expected_set_generation.Value() < entity->set_generation.Value()) {
+        return reject(ErrorCode::CapabilitySetGenerationStale,
+                      "the publication expects a stale capability set generation",
+                      "expected=" + request.expected_set_generation.ToString() + " current=" +
+                          entity->set_generation.ToString());
+      }
+      if (request.expected_set_generation.Value() > entity->set_generation.Value()) {
+        return reject(ErrorCode::CapabilitySetGenerationMismatch,
+                      "the publication expects a capability set generation that does not exist",
+                      "expected=" + request.expected_set_generation.ToString() + " current=" +
+                          entity->set_generation.ToString());
+      }
+    } else if (request.expected_set_generation.Value() != 0) {
+      return reject(ErrorCode::CapabilitySetGenerationMismatch,
+                    "no capability set exists for this entity generation yet",
+                    "expected=" + request.expected_set_generation.ToString());
+    }
+
     // 10. apply
     const std::shared_ptr<const EntityCapabilitySet> before_set = entity->set;
     const ReasonToken supersede_reason = request.reason.IsSet() ? request.reason : ReasonToken{};
-    std::uint32_t ordinal = 0;
     std::size_t applied = 0;
     std::size_t withdrawn = 0;
 
@@ -1508,7 +1514,7 @@ class CapabilityRegistry::Impl {
       SupersedeIdentity(*entity, source_key, supersede_reason);
       for (const CapabilityClaim& claim : request.claims) {
         auto status =
-            ApplyClaim(*entity, claim, request, request.coverage, ordinal++, supersede_reason);
+            ApplyClaim(*entity, claim, request, request.coverage, supersede_reason);
         if (!status) {
           return reject(status.Code(), status.GetError().message, status.GetError().detail);
         }
@@ -1530,7 +1536,7 @@ class CapabilityRegistry::Impl {
                                                         : request.claims.front().source_class;
           absence.coverage = Coverage::FullEnumeration;
           absence.reason = supersede_reason;
-          auto status = ApplyClaim(*entity, absence, request, Coverage::FullEnumeration, ordinal++,
+          auto status = ApplyClaim(*entity, absence, request, Coverage::FullEnumeration,
                                    supersede_reason);
           if (!status) {
             return reject(status.Code(), status.GetError().message, status.GetError().detail);
@@ -1541,7 +1547,7 @@ class CapabilityRegistry::Impl {
     } else if (request.mode == PublicationMode::PartialObservation) {
       for (const CapabilityClaim& claim : request.claims) {
         auto status =
-            ApplyClaim(*entity, claim, request, request.coverage, ordinal++, supersede_reason);
+            ApplyClaim(*entity, claim, request, request.coverage, supersede_reason);
         if (!status) {
           return reject(status.Code(), status.GetError().message, status.GetError().detail);
         }
@@ -1585,7 +1591,7 @@ class CapabilityRegistry::Impl {
                 break;
             }
             auto status =
-                ApplyClaim(*entity, claim, request, claim.coverage, ordinal++, supersede_reason);
+                ApplyClaim(*entity, claim, request, claim.coverage, supersede_reason);
             if (!status) {
               return reject(status.Code(), status.GetError().message, status.GetError().detail);
             }
@@ -2809,6 +2815,19 @@ Outcome<SaveReport> CapabilityRegistry::Save(const PersistenceConfig& config) co
               [](const AuthorityGrant& lhs, const AuthorityGrant& rhs) {
                 return lhs.scope < rhs.scope;
               });
+    for (const auto& entry : impl_->publishers_) {
+      if (!entry.second.active) continue;
+      internal::StoredRegistration stored;
+      stored.publisher = entry.first.publisher;
+      stored.worker_boot = entry.first.boot;
+      stored.scope = entry.second.registration.scope;
+      payload.registrations.push_back(std::move(stored));
+    }
+    std::sort(payload.registrations.begin(), payload.registrations.end(),
+              [](const internal::StoredRegistration& lhs, const internal::StoredRegistration& rhs) {
+                if (!(lhs.publisher == rhs.publisher)) return lhs.publisher < rhs.publisher;
+                return lhs.worker_boot < rhs.worker_boot;
+              });
     for (const FenceRecord& fence : impl_->fences_) {
       internal::StoredFence stored;
       stored.worker_boot = fence.worker_boot;
@@ -2952,6 +2971,21 @@ Outcome<LoadReport> CapabilityRegistry::Load(const PersistenceConfig& config) {
     record.fenced_at = impl.registry_generation_;
     impl.fences_.push_back(std::move(record));
     ++report.fenced_worker_boots;
+  }
+
+  for (const internal::StoredRegistration& stored : payload.registrations) {
+    if (!stored.publisher.IsSet() || !stored.worker_boot.IsSet()) continue;
+    if (impl.fenced_boots_.find(stored.worker_boot) != impl.fenced_boots_.end()) continue;
+    // Restored without authority: the next coordinator epoch advance fences it, so live
+    // publication authority never silently survives a restart.
+    PublisherRuntime& runtime = impl.publishers_[PublisherKey{stored.publisher,
+                                                              stored.worker_boot}];
+    runtime.registration.publisher = stored.publisher;
+    runtime.registration.scope = stored.scope;
+    runtime.registration.worker_boot = stored.worker_boot;
+    runtime.registration.epoch = impl.epoch_;
+    runtime.registration.accepted_generation = impl.registry_generation_;
+    runtime.active = false;
   }
 
   for (internal::StoredEntity& stored : payload.entities) {

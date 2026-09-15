@@ -186,10 +186,19 @@ FCR_TEST(distributed, handshake_authority_and_epoch) {
   FCR_CHECK(replay.Value().Idempotent());
   FCR_CHECK_EQ(replay.Value().new_set_generation.Value(), 1ull);
 
-  // A stale expected generation is rejected.
-  auto stale = client.Publish(Request(setup, setup.boot, "nic:wire-0", "p-2", "a-2",
-                                      {SpeedSetClaim({200'000'000'000ull})},
-                                      CapabilitySetGeneration::FromValue(0)));
+  // A second publication: the client fills the current generation it learned, so the
+  // caller does not have to track it.
+  auto second = client.Publish(Request(setup, setup.boot, "nic:wire-0", "p-2", "a-2",
+                                       {SpeedSetClaim({200'000'000'000ull})},
+                                       CapabilitySetGeneration::FromValue(0)));
+  FCR_REQUIRE_OK(second);
+  FCR_CHECK(second.Value().Committed());
+  FCR_CHECK_EQ(second.Value().new_set_generation.Value(), 2ull);
+
+  // An explicitly stale expectation is never silently rewritten and is rejected.
+  auto stale = client.Publish(Request(setup, setup.boot, "nic:wire-0", "p-3", "a-3",
+                                      {SpeedSetClaim({400'000'000'000ull})},
+                                      CapabilitySetGeneration::FromValue(1)));
   FCR_REQUIRE_OK(stale);
   FCR_CHECK(stale.Value().Rejected());
   FCR_CHECK(stale.Value().code == ErrorCode::CapabilitySetGenerationStale);
@@ -220,13 +229,13 @@ FCR_TEST(distributed, stale_epoch_clients_are_refused) {
   FCR_CHECK(result.Code() == ErrorCode::CoordinatorEpochStale ||
             result.Code() == ErrorCode::WorkerBootFenced);
 
-  // A fresh client learns the new epoch and a fresh boot is required.
+  // A fresh boot with no epoch expectation is accepted under the new epoch: live authority
+  // does not survive a restart, but a new instance can establish itself.
   PublisherClientOptions fresh_options = ClientOptions(setup, port, Boot(23));
   PublisherClient fresh_client(fresh_options);
   auto fresh_result = fresh_client.Connect();
-  FCR_CHECK(!fresh_result.HasValue());
-  FCR_CHECK(fresh_result.Code() == ErrorCode::WorkerBootFenced ||
-            fresh_result.Code() == ErrorCode::UnauthorizedPublisher);
+  FCR_REQUIRE_OK(fresh_result);
+  FCR_CHECK(fresh_client.Epoch() > epoch);
   coordinator.Stop();
 }
 
@@ -298,9 +307,10 @@ FCR_TEST(distributed, concurrent_publishers_and_repeated_lifecycle) {
 
   std::vector<std::unique_ptr<PublisherClient>> clients;
   for (int index = 0; index < 2; ++index) {
+    // The publication identity must match the connection identity, so both clients use the
+    // source the request helper stamps.
     PublisherClientOptions options =
         ClientOptions(setup, port, Boot(40 + static_cast<std::uint64_t>(index)));
-    options.source = *SourceId::Parse("wire-source-" + std::to_string(index));
     clients.push_back(std::make_unique<PublisherClient>(options));
   }
   FCR_REQUIRE_OK(clients[0]->Connect());

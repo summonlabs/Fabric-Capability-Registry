@@ -16,8 +16,10 @@ FCR_TEST(ids, entity_identifier_rules) {
   FCR_CHECK_EQ(switch_id.Value().CanonicalName(), std::string("leaf-01"));
   FCR_CHECK_EQ(switch_id.Value().ToString(), std::string("switch:leaf-01"));
 
+  // A canonical Fabric Registry port name may contain a slash.
   FCR_REQUIRE_OK(EntityId::Create(FabricEntityKind::Port, "port-1/1"));
-  FCR_CHECK(EntityId::Create(FabricEntityKind::Port, "port-1/1").HasValue() == false);
+  FCR_CHECK(EntityId::Create(FabricEntityKind::Port, "port 1").HasValue() == false);
+  FCR_CHECK(EntityId::Create(FabricEntityKind::Port, "port\1").HasValue() == false);
   FCR_CHECK_CODE(EntityId::Create(FabricEntityKind::Port, "Port-1"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(EntityId::Create(FabricEntityKind::Port, "-leading"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(EntityId::Create(FabricEntityKind::Port, "double--separator"),
@@ -52,13 +54,15 @@ FCR_TEST(ids, capability_identifier_rules) {
 
   FCR_REQUIRE_OK(CapabilityId::Parse("vendor.nvidia.raw_counter"));
 
-  FCR_CHECK_CODE(CapabilityId::Parse("port.speeds"), ErrorCode::UnknownNamespace);
+  // A two segment identifier is malformed before it is an unknown namespace.
+  FCR_CHECK_CODE(CapabilityId::Parse("port.speeds"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityId::Parse("fabric.port"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityId::Parse("fabric.port.supported_speeds.extra"),
                  ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityId::Parse("fabric.port.Supported"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityId::Parse(""), ErrorCode::MalformedIdentifier);
-  FCR_CHECK_CODE(CapabilityId::Parse("vendor.nvidia.spectrum"), ErrorCode::MalformedIdentifier);
+  // A three segment vendor identifier is a valid capability in the vendor.nvidia namespace.
+  FCR_REQUIRE_OK(CapabilityId::Parse("vendor.nvidia.spectrum"));
   FCR_CHECK_CODE(CapabilityNamespaceId::Parse("fabric"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityNamespaceId::Parse("vendor"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(CapabilityNamespaceId::Parse("other.port"), ErrorCode::UnknownNamespace);
@@ -72,7 +76,8 @@ FCR_TEST(ids, token_charsets) {
   FCR_REQUIRE_OK(PublisherId::Parse("publisher-1"));
   FCR_CHECK_CODE(PublisherId::Parse("Publisher"), ErrorCode::MalformedIdentifier);
   FCR_CHECK_CODE(PublisherId::Parse("publisher 1"), ErrorCode::MalformedIdentifier);
-  FCR_CHECK_CODE(WorkerBootId::Parse("0123456789abcdef"), ErrorCode::MalformedIdentifier);
+  FCR_CHECK_CODE(WorkerBootId::Parse("012abc"), ErrorCode::MalformedIdentifier);
+  FCR_REQUIRE_OK(WorkerBootId::Parse("0123456789abcdef"));
   FCR_REQUIRE_OK(WorkerBootId::Parse("0123456789abcdef0123456789abcdef"));
   FCR_CHECK_CODE(WorkerBootId::Parse("0123456789ABCDEF0123456789ABCDEF"),
                  ErrorCode::MalformedIdentifier);

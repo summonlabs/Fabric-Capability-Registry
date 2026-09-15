@@ -71,6 +71,11 @@ Digest ComputeDigest(std::string_view text);
 /// transmission error detection; content integrity uses SHA-256.
 std::uint32_t Crc32(std::span<const std::byte> data);
 
+/// Incremental CRC-32 over several spans. Begin, extend once per span, finish.
+std::uint32_t Crc32Begin() noexcept;
+std::uint32_t Crc32Extend(std::uint32_t state, std::span<const std::byte> data) noexcept;
+std::uint32_t Crc32Finish(std::uint32_t state) noexcept;
+
 }  // namespace fabric::capability
 
 namespace std {

@@ -6,9 +6,11 @@
 // epoch, binds a listener and serves capability publications until it is asked
 // to stop or its standard input closes.
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -281,9 +283,18 @@ int main(int argc, char** argv) {
   std::printf("READY\n");
   std::fflush(stdout);
 
+  // A serving coordinator does not stop merely because an unrelated stdin reached end of
+  // input: it serves until it is explicitly asked to stop or the process is terminated.
+  bool stop_requested = false;
   std::string line;
   while (std::getline(std::cin, line)) {
-    if (line == "stop") break;
+    if (line == "stop") {
+      stop_requested = true;
+      break;
+    }
+  }
+  while (!stop_requested) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
   coordinator.Stop();
   std::printf("STOPPED\n");

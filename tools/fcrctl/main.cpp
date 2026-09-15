@@ -656,8 +656,22 @@ int main(int argc, char** argv) {
     return kExitOk;
   }
 
+  // Command validation precedes any store access, so an unknown command is a usage error and
+  // never a store error.
+  const bool known_command =
+      command == "entities" || command == "entity" || command == "capability" ||
+      command == "evidence" || command == "explain" || command == "generation" ||
+      command == "snapshot" || command == "stats" || command == "diff" || command == "query";
+  if (!known_command) {
+    Usage();
+    return kExitUsage;
+  }
+
   auto loaded = LoadStore(arguments, registry);
-  if (!loaded.HasValue()) return Fail(kExitStore, loaded.GetError().ToString());
+  if (!loaded.HasValue()) {
+    return Fail(loaded.Code() == ErrorCode::InvalidArgument ? kExitUsage : kExitStore,
+                loaded.GetError().ToString());
+  }
 
   if (command == "entities") {
     PrintEntities(registry);

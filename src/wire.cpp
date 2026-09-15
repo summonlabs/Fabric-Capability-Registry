@@ -480,7 +480,7 @@ Outcome<std::vector<std::byte>> EncodeFrame(WireMessageType type, std::uint32_t 
   frame.insert(frame.end(), kFrameMagic.begin(), kFrameMagic.end());
   ByteWriter writer(frame);
   writer.U16(kProtocolVersion);
-  writer.U16(static_cast<std::uint16_t>(type));
+  writer.U16(static_cast<std::uint16_t>(WireCodeOf(kMessageTypeWire, type)));
   writer.U32(flags);
   writer.U64(request_id);
   const auto length = CheckedU32(payload.size());
@@ -489,13 +489,27 @@ Outcome<std::vector<std::byte>> EncodeFrame(WireMessageType type, std::uint32_t 
                                                     "frame payload length cannot be encoded");
   }
   writer.U32(length.Value());
+  // The CRC covers the header prefix (magic through declared payload length) and the
+  // payload, so a corrupted header field cannot be accepted as a valid frame.
+  std::uint32_t crc = Crc32Begin();
+  crc = Crc32Extend(crc, std::span<const std::byte>(frame.data(), kFrameHeaderBytes));
+  crc = Crc32Extend(crc, payload);
   frame.insert(frame.end(), payload.begin(), payload.end());
-  writer.U32(Crc32(payload));
+  writer.U32(Crc32Finish(crc));
   return frame;
 }
 
+// Rejection precedence is explicit and deterministic:
+//   1. fewer bytes than a header                 -> frame-malformed
+//   2. magic mismatch                            -> frame-malformed
+//   3. unsupported protocol version              -> frame-version-unsupported
+//   4. unknown message type                      -> frame-type-unknown
+//   5. declared payload beyond the frame bound   -> frame-too-large
+//   6. declared payload beyond the received data -> frame-malformed
+//   7. trailing bytes after the declared payload -> frame-trailing-bytes
+//   8. CRC mismatch                              -> frame-integrity-failure
 Outcome<WireFrame> DecodeFrame(std::span<const std::byte> bytes) {
-  if (bytes.size() < kFrameHeaderBytes + 4) {
+  if (bytes.size() < kFrameHeaderBytes) {
     return Outcome<WireFrame>::Failure(ErrorCode::FrameMalformed, "frame is shorter than its header",
                                        std::to_string(bytes.size()));
   }
@@ -531,6 +545,11 @@ Outcome<WireFrame> DecodeFrame(std::span<const std::byte> bytes) {
                                        std::to_string(payload_length.Value()));
   }
   const std::size_t expected = kFrameHeaderBytes + payload_length.Value() + 4;
+  if (bytes.size() < expected) {
+    return Outcome<WireFrame>::Failure(
+        ErrorCode::FrameMalformed, "frame is shorter than the declared payload length",
+        "actual=" + std::to_string(bytes.size()) + " expected=" + std::to_string(expected));
+  }
   if (bytes.size() != expected) {
     return Outcome<WireFrame>::Failure(
         ErrorCode::FrameTrailingBytes,
@@ -542,9 +561,12 @@ Outcome<WireFrame> DecodeFrame(std::span<const std::byte> bytes) {
   ByteReader trailer(bytes.subspan(kFrameHeaderBytes + payload_length.Value(), 4));
   auto crc = trailer.U32();
   if (!crc) return crc.GetError();
-  if (crc.Value() != Crc32(payload)) {
+  std::uint32_t computed = Crc32Begin();
+  computed = Crc32Extend(computed, bytes.first(kFrameHeaderBytes));
+  computed = Crc32Extend(computed, payload);
+  if (crc.Value() != Crc32Finish(computed)) {
     return Outcome<WireFrame>::Failure(ErrorCode::FrameIntegrityFailure,
-                                       "frame payload CRC does not match");
+                                       "frame header and payload CRC does not match");
   }
   WireFrame frame;
   frame.version = version.Value();

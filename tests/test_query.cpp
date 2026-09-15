@@ -13,12 +13,14 @@ namespace {
 
 void PublishNic(Fixture& fixture, const char* name, std::uint64_t rx_queues) {
   const EntityId entity = Entity(name);
+  const std::string stem = "p-snapshot-" + entity.CanonicalName();
   FCR_REQUIRE_OK(fixture.PublishSnapshot(entity, EntityGeneration::FromValue(1),
                                          {SpeedSetClaim({100'000'000'000ull}),
                                           QuantityClaim("fabric.queue.max_rx_queues", Unit::Count,
                                                         rx_queues),
                                           TelemetryClaim({0, 1})},
-                                         {}, Coverage::FullEnumeration, "p-snapshot", "a-snapshot"));
+                                         {}, Coverage::FullEnumeration, stem.c_str(),
+                                         ("a-snapshot-" + entity.CanonicalName()).c_str()));
 }
 
 }  // namespace
@@ -88,9 +90,10 @@ FCR_TEST(query, evidence_and_explanations_are_deterministic) {
   FCR_CHECK(first.steps.size() >= 2);
 
   // Publication explanations are retained and explainable.
-  const Explanation publication = fixture.registry->ExplainPublication(*PublicationId::Parse("p-snapshot")).HasValue()
-                                      ? fixture.registry->ExplainPublication(*PublicationId::Parse("p-snapshot")).Value()
-                                      : Explanation{};
+  const PublicationId retained = *PublicationId::Parse("p-snapshot-a");
+  const auto explained = fixture.registry->ExplainPublication(retained);
+  FCR_REQUIRE_OK(explained);
+  const Explanation publication = explained.Value();
   FCR_CHECK(!publication.steps.empty());
   FCR_CHECK(publication.ToText().find("publication.journal") != std::string::npos);
   FCR_CHECK_CODE(fixture.registry->ExplainPublication(*PublicationId::Parse("p-unknown")),

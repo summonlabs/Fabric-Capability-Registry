@@ -36,6 +36,13 @@ class ChildProcess {
                                                     const std::vector<std::string>& arguments,
                                                     const std::string& working_directory = {});
 
+  /// Starts a process with a private stdin pipe that stays open for as long as this object
+  /// lives, so a server child does not observe an immediate end of input and shut itself
+  /// down. Use WriteStdin() to request a graceful stop.
+  static std::optional<ChildProcess> StartWithStdinControl(
+      const std::string& executable, const std::vector<std::string>& arguments,
+      const std::string& working_directory = {});
+
   bool Valid() const noexcept { return process_ != nullptr; }
   unsigned long Pid() const noexcept { return pid_; }
   bool Running() const;
@@ -56,11 +63,17 @@ class ChildProcess {
   /// with StartCapturing() and only after it exited.
   std::string ReadCaptured();
 
+  /// Writes to the child stdin pipe created by StartWithStdinControl().
+  bool WriteStdin(const std::string& text);
+  /// Closes the child stdin pipe, which a serving child reads as an orderly stop request.
+  void CloseStdin();
+
  private:
   void Release();
 
-  void* process_ = nullptr;  // HANDLE
-  void* capture_ = nullptr;   // HANDLE: read end of the capture pipe
+  void* process_ = nullptr;     // HANDLE
+  void* capture_ = nullptr;     // HANDLE: read end of the capture pipe
+  void* stdin_write_ = nullptr; // HANDLE: write end of the child stdin pipe
   unsigned long pid_ = 0;
 };
 

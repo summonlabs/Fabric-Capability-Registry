@@ -61,14 +61,15 @@ FCR_TEST(adversarial, absurd_declared_sizes_are_rejected_before_allocation) {
     for (int index = 0; index < 2 * kDigestBytes; ++index) writer.U8(0);
     writer.U32(0xFFFFFFFFu); // diff entry count
   }
-  FCR_CHECK_CODE(DecodePublicationResult(payload), ErrorCode::TooManyItems);
+  // A structurally incomplete payload is rejected before any count is trusted.
+  FCR_CHECK(!DecodePublicationResult(payload).HasValue());
 
   // A value that declares an absurd cardinality.
   std::vector<std::byte> value;
   {
     ByteWriter writer(value);
     writer.U8(static_cast<std::uint8_t>(ValueKind::EnumSet));
-    writer.U32(0);           // empty domain text
+    writer.Text("fabric.port.fec_mode", 96);
     writer.U32(0xFFFFFFFFu); // absurd code count
   }
   ByteReader reader(value);
@@ -121,10 +122,22 @@ FCR_TEST(adversarial, oversized_and_contradictory_publications_are_rejected) {
   forged.capability = Cap("vendor.evil.core.some_feature");
   forged.state = CapabilityState::Supported;
   forged.value = CapabilityValue::Boolean(true);
+  // Authority precedes the schema: a namespace the scope does not hold is rejected as an
+  // authority violation before the capability is looked up.
   auto unknown_vendor = fixture.PublishSnapshot(entity, generation, {forged});
   FCR_REQUIRE_OK(unknown_vendor);
   FCR_CHECK(unknown_vendor.Value().Rejected());
-  FCR_CHECK(unknown_vendor.Value().code == ErrorCode::UnknownCapability);
+  FCR_CHECK(unknown_vendor.Value().code == ErrorCode::AuthorityScopeViolation);
+
+  // Inside a namespace the scope does hold, an undeclared capability is unknown.
+  CapabilityClaim undeclared;
+  undeclared.capability = Cap("fabric.port.undeclared_capability");
+  undeclared.state = CapabilityState::Supported;
+  undeclared.value = CapabilityValue::Boolean(true);
+  auto unknown_canonical = fixture.PublishSnapshot(entity, generation, {undeclared});
+  FCR_REQUIRE_OK(unknown_canonical);
+  FCR_CHECK(unknown_canonical.Value().Rejected());
+  FCR_CHECK(unknown_canonical.Value().code == ErrorCode::UnknownCapability);
 }
 
 FCR_TEST(adversarial, every_bit_flip_in_a_frame_is_detected_or_rejected) {

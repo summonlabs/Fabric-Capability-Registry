@@ -94,11 +94,21 @@ struct StoredFence {
   ReasonToken reason;
 };
 
+/// A publisher instance that held live authority at save time. It is restored as an
+/// inactive registration so that the next coordinator start fences it: live publication
+/// authority must never silently survive a restart.
+struct StoredRegistration {
+  PublisherId publisher;
+  WorkerBootId worker_boot;
+  AuthorityScopeId scope;
+};
+
 struct StorePayload {
   CoordinatorEpoch epoch;
   RegistryGeneration registry_generation;
   std::vector<AuthorityGrant> authorities;
   std::vector<StoredFence> fences;
+  std::vector<StoredRegistration> registrations;
   std::vector<StoredEntity> entities;
 };
 

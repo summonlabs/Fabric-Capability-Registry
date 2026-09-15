@@ -148,8 +148,14 @@ FCR_TEST(requirement, compound_expressions_are_bounded_and_deterministic) {
   negate.kind = RequirementKind::Not;
   negate.children = {not_supported};
   negated.children = {negate};
+  // The negated leaf demands proof that the capability is UNSUPPORTED; with no claim at
+  // all the leaf is unproven and the negation stays undetermined.
   FCR_CHECK(fixture.registry->Evaluate(entity, negated).outcome ==
-            RequirementOutcome::NotSatisfied);
+            RequirementOutcome::Undetermined);
+  Requirement lenient_negation = negated;
+  lenient_negation.children.front().children.front().require_proof = false;
+  FCR_CHECK(fixture.registry->Evaluate(entity, lenient_negation).outcome ==
+            RequirementOutcome::Satisfied);
 
   // NOT is not permitted as the root requirement.
   Requirement root_not;

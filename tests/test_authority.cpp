@@ -77,6 +77,7 @@ FCR_TEST(authority, publisher_allowlist_and_scope_binding) {
   // A capability class the scope holds but a mode it does not hold.
   request.entity = Entity("nic:0");
   request.mode = PublicationMode::Incremental;
+  request.claims.clear();
   IncrementalEdit edit;
   edit.operation = IncrementalOperation::WithdrawClaim;
   edit.capability = Cap("fabric.port.supported_speeds");

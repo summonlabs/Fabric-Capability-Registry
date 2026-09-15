@@ -222,6 +222,12 @@ class CapabilityCoordinator::Impl {
     if (options_.advance_epoch_on_start) {
       auto advanced = registry_.AdvanceCoordinatorEpoch(MakeReason("coordinator-start"));
       if (!advanced.HasValue()) return advanced.GetError();
+      if (options_.persist_on_start && !options_.persistence.directory.empty()) {
+        // The epoch and the fences it created must be durable before the listener serves,
+        // otherwise a crash would lose the fact that the previous epoch's boots are stale.
+        auto saved = registry_.Save(options_.persistence);
+        if (!saved.HasValue()) return saved.GetError();
+      }
     }
 
     listener_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -347,12 +353,12 @@ class CapabilityCoordinator::Impl {
         std::lock_guard<std::mutex> guard(connections_mutex_);
         if (connections_.size() >= options_.max_connections) {
           CloseSocket(connection);
-          ++stats_.connections_rejected;
+          Bump(&CoordinatorStats::connections_rejected);
           continue;
         }
         connections_[connection] = ConnectionState{};
       }
-      ++stats_.connections_accepted;
+      Bump(&CoordinatorStats::connections_accepted);
       std::lock_guard<std::mutex> guard(threads_mutex_);
       worker_threads_.emplace_back([this, connection]() { ServeConnection(connection); });
     }
@@ -380,10 +386,10 @@ class CapabilityCoordinator::Impl {
     for (;;) {
       auto frame = ReceiveFrame(connection);
       if (!frame.HasValue()) {
-        ++stats_.frames_rejected;
+        Bump(&CoordinatorStats::frames_rejected);
         break;
       }
-      ++stats_.frames_received;
+      Bump(&CoordinatorStats::frames_received);
       const WireFrame& request = frame.Value();
       if (request.type == WireMessageType::Goodbye) break;
 
@@ -470,14 +476,14 @@ class CapabilityCoordinator::Impl {
         state = &found->second;
       }
       if (!handshake_done || !state->handshake_done) {
-        ++stats_.frames_rejected;
+        Bump(&CoordinatorStats::frames_rejected);
         break;
       }
 
       if (request.type == WireMessageType::Publish) {
         const auto cached = state->replay.find(request.request_id);
         if (cached != state->replay.end()) {
-          ++stats_.duplicate_requests_replayed;
+          Bump(&CoordinatorStats::duplicate_requests_replayed);
           if (!SendFrame(connection, WireMessageType::PublishAck, request.request_id,
                          cached->second.response)
                    .HasValue()) {
@@ -519,13 +525,13 @@ class CapabilityCoordinator::Impl {
         }
         switch (result.status) {
           case PublicationStatus::Committed:
-            ++stats_.publications_committed;
+            Bump(&CoordinatorStats::publications_committed);
             break;
           case PublicationStatus::IdempotentReplay:
-            ++stats_.publications_idempotent;
+            Bump(&CoordinatorStats::publications_idempotent);
             break;
           case PublicationStatus::Rejected:
-            ++stats_.publications_rejected;
+            Bump(&CoordinatorStats::publications_rejected);
             break;
         }
         auto encoded = EncodePublicationResult(result);
@@ -540,13 +546,19 @@ class CapabilityCoordinator::Impl {
           state->replay_order.push_back(request.request_id);
           state->replay[request.request_id] = ReplayCacheEntry{encoded.Value()};
         }
+        if (options_.persist_on_mutation && !options_.persistence.directory.empty()) {
+          // Durability before acknowledgement: a client that is told "committed" must be able
+          // to rely on the state surviving a coordinator crash, and a kill that lands between
+          // the commit and the save must not be able to lose a fencing record.
+          auto saved = registry_.Save(options_.persistence);
+          if (!saved.HasValue()) {
+            Bump(&CoordinatorStats::frames_rejected);
+          }
+        }
         if (!SendFrame(connection, WireMessageType::PublishAck, request.request_id,
                        encoded.Value())
                  .HasValue()) {
           break;
-        }
-        if (options_.persist_on_mutation && !options_.persistence.directory.empty()) {
-          registry_.Save(options_.persistence);
         }
         continue;
       }
@@ -598,7 +610,7 @@ class CapabilityCoordinator::Impl {
               error.code = fenced.Code();
               error.message = fenced.GetError().ToString();
             } else {
-              ++stats_.publishers_fenced;
+              Bump(&CoordinatorStats::publishers_fenced);
               {
                 std::lock_guard<std::mutex> guard(boots_mutex_);
                 boot_scopes_.erase(decoded.Value().worker_boot);
@@ -621,7 +633,7 @@ class CapabilityCoordinator::Impl {
         continue;
       }
 
-      ++stats_.frames_rejected;
+      Bump(&CoordinatorStats::frames_rejected);
       ErrorPayload error;
       error.code = ErrorCode::FrameTypeUnknown;
       error.message = "message type is not accepted in this connection state";
@@ -635,7 +647,7 @@ class CapabilityCoordinator::Impl {
 
     if (handshake_done && boot.IsSet()) {
       registry_.FenceWorkerBoot(boot, MakeReason("connection-lost"));
-      ++stats_.publishers_fenced;
+      Bump(&CoordinatorStats::publishers_fenced);
       std::lock_guard<std::mutex> guard(boots_mutex_);
       boot_scopes_.erase(boot);
     }
@@ -668,6 +680,13 @@ class CapabilityCoordinator::Impl {
 
   std::mutex stats_mutex_;
   CoordinatorStats stats_;
+
+  /// Coordinator statistics are read through Stats() under stats_mutex_, so every
+  /// increment goes through the same mutex.
+  void Bump(std::uint64_t CoordinatorStats::*field, std::uint64_t delta = 1) {
+    std::lock_guard<std::mutex> guard(stats_mutex_);
+    stats_.*field += delta;
+  }
 };
 
 CapabilityCoordinator::CapabilityCoordinator(CoordinatorOptions options)
@@ -762,28 +781,28 @@ class PublisherClient::Impl {
     hello.namespaces = options_.namespaces;
     auto encoded = EncodeHello(hello);
     if (!encoded.HasValue()) {
-      Close();
+      CloseLocked();
       return encoded.GetError();
     }
     request_id_ = 1;
     auto sent = SendFrame(socket_, WireMessageType::Hello, request_id_, encoded.Value());
     if (!sent.HasValue()) {
-      Close();
+      CloseLocked();
       return sent.GetError();
     }
     auto response = ReceiveFrame(socket_);
     if (!response.HasValue()) {
-      Close();
+      CloseLocked();
       return response.GetError();
     }
     if (response.Value().type != WireMessageType::HelloAck) {
-      Close();
+      CloseLocked();
       return Status::Failure(ErrorCode::FrameStateViolation,
                              "the coordinator did not answer the handshake");
     }
     auto ack = DecodeHelloAck(response.Value().payload);
     if (!ack.HasValue()) {
-      Close();
+      CloseLocked();
       return ack.GetError();
     }
     if (!ack.Value().accepted) {
@@ -797,7 +816,7 @@ class PublisherClient::Impl {
           message = payload.Value().message.empty() ? message : payload.Value().message;
         }
       }
-      Close();
+      CloseLocked();
       return Status::Failure(code, message, options_.publisher.Value());
     }
     epoch_ = ack.Value().epoch;

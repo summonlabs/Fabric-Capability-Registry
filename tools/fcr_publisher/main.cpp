@@ -5,9 +5,11 @@
 // Real publisher worker: connects to a coordinator, performs the handshake and
 // publishes one capability request built entirely from command line arguments.
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <thread>
 #include <map>
 #include <string>
 #include <vector>
@@ -197,7 +199,9 @@ int main(int argc, char** argv) {
   Coverage coverage = Coverage::Partial;
   std::uint8_t provenance = 6;
   std::uint8_t source_class = 9;
-  DurabilityClass durability = DurabilityClass::Durable;
+  // A live observation is process bound unless the publisher explicitly asks for a durable
+  // declaration with --durability durable.
+  DurabilityClass durability = DurabilityClass::ProcessBound;
   std::uint64_t expected_set_generation = 0;
   std::uint64_t repeat = 1;
   bool hold = false;
@@ -219,6 +223,11 @@ int main(int argc, char** argv) {
     if (argument == "--help" || argument == "-h") {
       Usage();
       return 0;
+    }
+    // Flag-only arguments must be handled before any value is consumed.
+    if (argument == "--hold") {
+      hold = true;
+      continue;
     }
     const char* value = nullptr;
     if (argument.rfind("--", 0) == 0) {
@@ -406,10 +415,6 @@ int main(int argc, char** argv) {
       fence_boot_text = value;
       continue;
     }
-    if (argument == "--hold") {
-      hold = true;
-      continue;
-    }
     std::fprintf(stderr, "error: unknown argument '%s'\n", argument.c_str());
     Usage();
     return 2;
@@ -571,9 +576,10 @@ int main(int argc, char** argv) {
   }
 
   if (hold) {
-    std::string line;
-    while (std::getline(std::cin, line)) {
-      if (line == "stop") break;
+    // A holding worker keeps its publication authority alive until the process is
+    // terminated. This is the state the real worker-death proof observes.
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
   }
   std::printf("DONE status=%s\n", std::string(PublicationStatusName(last_status)).c_str());

@@ -40,6 +40,7 @@ constexpr std::uint8_t kRecordMeta = 1;
 constexpr std::uint8_t kRecordAuthority = 2;
 constexpr std::uint8_t kRecordFence = 3;
 constexpr std::uint8_t kRecordEntity = 4;
+constexpr std::uint8_t kRecordRegistration = 5;
 
 bool IsAsciiAlphaNum(char ch) {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
@@ -757,6 +758,18 @@ Outcome<std::vector<std::byte>> EncodePayload(const internal::StorePayload& payl
     if (!reason) return reason.GetError();
     finish_record(length_offset);
   }
+  for (const internal::StoredRegistration& registration : payload.registrations) {
+    const std::size_t length_offset = begin_record(kRecordRegistration);
+    bytes.resize(bytes.size() + 4);
+    ByteWriter writer(bytes);
+    auto publisher = writer.Text(registration.publisher.Value(), limits::kMaxPublisherIdLength);
+    if (!publisher) return publisher.GetError();
+    auto boot = writer.Text(registration.worker_boot.Value(), 64);
+    if (!boot) return boot.GetError();
+    auto scope = writer.Text(registration.scope.Value(), limits::kMaxAuthorityScopeIdLength);
+    if (!scope) return scope.GetError();
+    finish_record(length_offset);
+  }
   for (const internal::StoredEntity& entity : payload.entities) {
     const std::size_t length_offset = begin_record(kRecordEntity);
     bytes.resize(bytes.size() + 4);
@@ -770,9 +783,12 @@ Outcome<std::vector<std::byte>> EncodePayload(const internal::StorePayload& payl
 
 Outcome<internal::StorePayload> DecodePayload(std::span<const std::byte> bytes) {
   internal::StorePayload payload;
-  ByteReader reader(bytes);
+  // The record cursor is the current span: body offsets are relative to it, never to the
+  // original payload, otherwise every record after the first is decoded from stale bytes.
+  std::span<const std::byte> remaining = bytes;
   bool saw_meta = false;
-  while (!reader.Empty()) {
+  while (!remaining.empty()) {
+    ByteReader reader(remaining);
     auto type = reader.U8();
     if (!type) return type.GetError();
     auto length = reader.U32();
@@ -782,7 +798,7 @@ Outcome<internal::StorePayload> DecodePayload(std::span<const std::byte> bytes) 
           ErrorCode::PersistenceCorrupt, "store record length exceeds the remaining payload",
           std::to_string(length.Value()));
     }
-    const std::span<const std::byte> body = bytes.subspan(reader.offset(), length.Value());
+    const std::span<const std::byte> body = remaining.subspan(reader.offset(), length.Value());
     ByteReader record(body);
     switch (type.Value()) {
       case kRecordMeta: {
@@ -837,6 +853,30 @@ Outcome<internal::StorePayload> DecodePayload(std::span<const std::byte> bytes) 
         payload.fences.push_back(std::move(fence));
         break;
       }
+      case kRecordRegistration: {
+        if (payload.registrations.size() >= 4096) {
+          return Outcome<internal::StorePayload>::Failure(ErrorCode::PersistenceLimitExceeded,
+                                                          "store exceeds the registration bound");
+        }
+        auto publisher = record.Text(limits::kMaxPublisherIdLength);
+        if (!publisher) return publisher.GetError();
+        auto parsed_publisher = PublisherId::Parse(publisher.Value());
+        if (!parsed_publisher) return parsed_publisher.GetError();
+        auto boot = record.Text(64);
+        if (!boot) return boot.GetError();
+        auto parsed_boot = WorkerBootId::Parse(boot.Value());
+        if (!parsed_boot) return parsed_boot.GetError();
+        auto scope = record.Text(limits::kMaxAuthorityScopeIdLength);
+        if (!scope) return scope.GetError();
+        auto parsed_scope = AuthorityScopeId::Parse(scope.Value());
+        if (!parsed_scope) return parsed_scope.GetError();
+        internal::StoredRegistration registration;
+        registration.publisher = parsed_publisher.Value();
+        registration.worker_boot = parsed_boot.Value();
+        registration.scope = parsed_scope.Value();
+        payload.registrations.push_back(std::move(registration));
+        break;
+      }
       case kRecordEntity: {
         if (payload.entities.size() >= limits::kMaxEntities) {
           return Outcome<internal::StorePayload>::Failure(ErrorCode::PersistenceLimitExceeded,
@@ -854,7 +894,7 @@ Outcome<internal::StorePayload> DecodePayload(std::span<const std::byte> bytes) 
     }
     auto end = record.ExpectEnd();
     if (!end) return end.GetError();
-    reader = ByteReader(bytes.subspan(reader.offset() + length.Value()));
+    remaining = remaining.subspan(reader.offset() + length.Value());
   }
   if (!saw_meta) {
     return Outcome<internal::StorePayload>::Failure(ErrorCode::PersistenceCorrupt,

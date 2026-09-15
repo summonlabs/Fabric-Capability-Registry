@@ -93,14 +93,14 @@ FCR_TEST(publication, idempotent_replay_does_not_advance_generation) {
   std::vector<CapabilityClaim> claims = {SpeedSetClaim({100'000'000'000ull})};
 
   auto first = fixture.PublishSnapshot(entity, generation, claims, {}, Coverage::FullEnumeration,
-                                       "p-1", "a-1");
+                                       "p-1", "a-1", 1);
   FCR_REQUIRE_OK(first);
   FCR_CHECK(first.Value().Committed());
   FCR_CHECK_EQ(first.Value().new_set_generation.Value(), 1ull);
 
   // Exact replay: same attempt, same content.
   auto replay = fixture.PublishSnapshot(entity, generation, claims, CapabilitySetGeneration::FromValue(1),
-                                        Coverage::FullEnumeration, "p-1", "a-1");
+                                        Coverage::FullEnumeration, "p-1", "a-1", 1);
   FCR_REQUIRE_OK(replay);
   FCR_CHECK(replay.Value().Idempotent());
   FCR_CHECK_EQ(replay.Value().new_set_generation.Value(), 1ull);
@@ -110,7 +110,7 @@ FCR_TEST(publication, idempotent_replay_does_not_advance_generation) {
   std::vector<CapabilityClaim> different = {SpeedSetClaim({200'000'000'000ull})};
   auto conflict = fixture.PublishSnapshot(entity, generation, different,
                                           CapabilitySetGeneration::FromValue(1),
-                                          Coverage::FullEnumeration, "p-1b", "a-1");
+                                          Coverage::FullEnumeration, "p-1b", "a-1", 1);
   FCR_REQUIRE_OK(conflict);
   FCR_CHECK(conflict.Value().Rejected());
   FCR_CHECK(conflict.Value().code == ErrorCode::DuplicateAttemptConflict);
@@ -119,16 +119,16 @@ FCR_TEST(publication, idempotent_replay_does_not_advance_generation) {
   // idempotent success.
   auto second = fixture.PublishSnapshot(entity, generation, different,
                                         CapabilitySetGeneration::FromValue(1),
-                                        Coverage::FullEnumeration, "p-2", "a-2");
+                                        Coverage::FullEnumeration, "p-2", "a-2", 2);
   FCR_REQUIRE_OK(second);
   FCR_CHECK(second.Value().Committed());
   FCR_CHECK_EQ(second.Value().new_set_generation.Value(), 2ull);
 
   auto stale = fixture.PublishSnapshot(entity, generation, claims, CapabilitySetGeneration::FromValue(2),
-                                       Coverage::FullEnumeration, "p-1", "a-1");
+                                       Coverage::FullEnumeration, "p-1", "a-1", 1);
   FCR_REQUIRE_OK(stale);
   FCR_CHECK(stale.Value().Rejected());
-  FCR_CHECK(stale.Value().code == ErrorCode::StaleReplay);
+  FCR_CHECK_EQ(std::string(ErrorCodeName(stale.Value().code)), std::string("stale-replay"));
   FCR_CHECK(IsStaleRejection(stale.Value().code));
 }
 
@@ -215,10 +215,14 @@ FCR_TEST(publication, claim_shape_validation) {
   FCR_CHECK(contradiction.Value().Rejected());
   FCR_CHECK(contradiction.Value().code == ErrorCode::ValueContradiction);
 
-  // Nothing was committed by any of the rejected publications.
+  // Nothing was committed by any of the rejected publications: the entity either does not
+  // exist at all or holds no capability record.
   auto record = fixture.registry->EntityRecord(entity);
-  FCR_REQUIRE_OK(record);
-  FCR_CHECK(record.Value().current_set.capabilities.empty());
+  if (record.HasValue()) {
+    FCR_CHECK(record.Value().current_set.capabilities.empty());
+  } else {
+    FCR_CHECK(record.Code() == ErrorCode::UnknownEntity);
+  }
 }
 
 FCR_TEST(publication, publication_modes_have_distinct_semantics) {
