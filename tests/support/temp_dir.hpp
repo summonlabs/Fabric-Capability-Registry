@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
+#include <random>
 #include <string>
 
 #include "test_framework.hpp"
@@ -18,9 +20,24 @@ class TempDir {
   explicit TempDir(const std::string& name) {
     std::error_code error;
     const std::filesystem::path base = std::filesystem::temp_directory_path(error);
-    path_ = base / ("fcr-" + name + "-" + std::to_string(counter()));
-    std::filesystem::remove_all(path_, error);
-    std::filesystem::create_directories(path_, error);
+    if (error) {
+      throw TestAbort("temporary directory is unavailable: " + error.message());
+    }
+    path_ = base / ("fcr-" + name + "-" + unique_suffix());
+
+    std::error_code removal_error;
+    std::filesystem::remove_all(path_, removal_error);
+    std::error_code creation_error;
+    if (!std::filesystem::create_directories(path_, creation_error) || creation_error) {
+      // A directory that could not be made clean is never used silently: a stale store
+      // would corrupt the proof and surface far away from its real cause.
+      const std::string detail =
+          creation_error ? creation_error.message()
+                         : (removal_error ? removal_error.message()
+                                          : std::string("the path already exists"));
+      throw TestAbort("temporary directory " + path_.string() +
+                      " could not be made clean for this run: " + detail);
+    }
   }
 
   ~TempDir() {
@@ -35,9 +52,16 @@ class TempDir {
   std::string string() const { return path_.string(); }
 
  private:
-  static unsigned counter() {
-    static unsigned value = 0;
-    return ++value;
+  /// A suffix that is unique across processes as well as inside one. A per-process
+  /// counter alone is not enough: it makes the first directory of every process share a
+  /// single path, so two suites running at the same time -- Release beside Debug, or two
+  /// shards on one agent -- would share a store and corrupt each other's proofs, and a
+  /// directory left behind by a killed run would be silently reused.
+  static std::string unique_suffix() {
+    static const unsigned long long process_seed =
+        static_cast<unsigned long long>(std::random_device{}());
+    static std::atomic<unsigned long long> counter{0};
+    return std::to_string(process_seed) + "-" + std::to_string(++counter);
   }
 
   std::filesystem::path path_;
